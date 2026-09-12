@@ -1,0 +1,14 @@
+# Real secrets — never commit
+.env
+*.secret
+secrets.*
+
+# Local Claude settings (may contain machine-specific config)
+settings.local.json
+.claude/settings.local.json
+.playwright-mcp/
+
+# Deploy artifact rendered from the committed workflow + .env: it carries the
+# real Slack webhook, Data Table id and manual-trigger path. The committed
+# workflows/abuse-report-watcher.json keeps the <<PLACEHOLDERS>> instead.
+deploy.workflow.json

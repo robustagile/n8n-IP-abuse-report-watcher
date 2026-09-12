@@ -1,0 +1,404 @@
+{
+  "name": "AbuseWatch",
+  "nodes": [
+    {
+      "id": "a1",
+      "name": "Schedule Hourly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -240,
+        340
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Fires at the top of every hour, in the workflow's own timezone (Settings -> Timezone; keep TZ in Analyze in sync)."
+    },
+    {
+      "id": "a0",
+      "name": "Manual Check",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -240,
+        520
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "<<MANUAL_WEBHOOK_PATH>>",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "<<MANUAL_WEBHOOK_PATH>>",
+      "notes": "On-demand run. POST to it with ?force=1 to post to Slack even when there is nothing new (handy for smoke tests)."
+    },
+    {
+      "id": "a2",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// ─── AbuseWatch configuration ────────────────────────────────────────────────\n// The ONLY place to edit when adding/removing a watched address.\n// Add a line to WATCHED and the rest of the workflow picks it up automatically.\n//\n// REPLACE THESE EXAMPLES with the public addresses you are responsible for.\n// (203.0.113.x / 198.51.100.x are the RFC 5737 documentation ranges — they are\n// placeholders, not real hosts.)  Watch only addresses you own or administer.\nconst WATCHED = [\n  { ip: '203.0.113.10',  label: 'Home' },\n  { ip: '198.51.100.25', label: 'Web server' },\n];\n\nconst MAX_AGE_DAYS = 90;   // AbuseIPDB report window queried each run (1-365)\nconst FORCE_POST   = false; // true = post to Slack on every run (manual testing)\n// ─────────────────────────────────────────────────────────────────────────────\n\n// A manual run POSTed with ?force=1 posts to Slack even when nothing is new.\n// Referencing a trigger that did not fire throws, hence the try/catch.\nlet forcePost = FORCE_POST;\ntry {\n  forcePost = forcePost || String($('Manual Check').first().json.query.force) === '1';\n} catch (e) { /* scheduled run: no Manual Check node output */ }\n\nreturn WATCHED.map((w) => ({\n  json: {\n    __kind: 'abusewatch_check',\n    ip: String(w.ip).trim(),\n    label: w.label,\n    maxAgeInDays: MAX_AGE_DAYS,\n    forcePost: forcePost,\n    checkUrl: 'https://www.abuseipdb.com/check/' + String(w.ip).trim(),\n  },\n}));\n"
+      },
+      "notes": "EDIT HERE to add/remove a watched address. One output item per IP."
+    },
+    {
+      "id": "a3",
+      "name": "Check AbuseIPDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        240,
+        200
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.abuseipdb.com/api/v2/check?ipAddress={{ encodeURIComponent($json.ip) }}&maxAgeInDays={{ $json.maxAgeInDays }}&verbose",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "AbuseIPDB API Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Runs once per IP. On failure it still emits one item (carrying \"error\") so the branch stays aligned with Config by position."
+    },
+    {
+      "id": "a4",
+      "name": "Get State",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        500
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "<<DATATABLE_ID>>",
+          "cachedResultName": "abuse_watch_state"
+        },
+        "matchType": "anyCondition",
+        "filters": {},
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "notes": "No conditions = every row. Runs once, not once per input item."
+    },
+    {
+      "id": "a5",
+      "name": "Merge Config + Response",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        480,
+        260
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "notes": "Re-attaches ip/label/checkUrl to the matching API response."
+    },
+    {
+      "id": "a6",
+      "name": "Merge State",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        700,
+        380
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2
+      },
+      "notes": "Check results plus the stored state rows, into one Code node."
+    },
+    {
+      "id": "a7",
+      "name": "Analyze",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        380
+      ],
+      "parameters": {
+        "jsCode": "// --- AbuseWatch: diff against stored state, build the Slack post, compute new state ---\n// Local timezone used for stamps, the recap hour and the recap's date stamp.\n// Keep TZ in sync with the workflow's own timezone setting (Settings -> Timezone).\nconst TZ               = 'America/New_York';\nconst TZ_LABEL         = 'ET'; // short label appended to rendered times\nconst DIGEST_HOUR      = 16; // local hour of the daily \"all clean\" recap (0-23)\nconst FAIL_ALERT_AFTER = 3;  // consecutive failed checks before we shout about it\nconst FAIL_RENAG_EVERY = 24; // ...and how many further failures between reminders\nconst MAX_BULLETS      = 8;  // report lines rendered per IP in one message\n\nconst CATEGORIES = {\n  1: 'DNS Compromise', 2: 'DNS Poisoning', 3: 'Fraud Orders', 4: 'DDoS Attack',\n  5: 'FTP Brute-Force', 6: 'Ping of Death', 7: 'Phishing', 8: 'Fraud VoIP',\n  9: 'Open Proxy', 10: 'Web Spam', 11: 'Email Spam', 12: 'Blog Spam', 13: 'VPN IP',\n  14: 'Port Scan', 15: 'Hacking', 16: 'SQL Injection', 17: 'Spoofing',\n  18: 'Brute-Force', 19: 'Bad Web Bot', 20: 'Exploited Host', 21: 'Web App Attack',\n  22: 'SSH', 23: 'IoT Targeted',\n};\n\n// Reporter comments are attacker-influenced free text: escape Slack mrkdwn, flatten, clip.\nconst esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst oneLine = (s) => esc(s).replace(/[\\s\\x00-\\x1F]+/g, ' ').trim();\nconst clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);\n\nfunction stamp(d) {\n  const t = d instanceof Date ? d : new Date(d);\n  if (isNaN(t.getTime())) return '';\n  const p = new Intl.DateTimeFormat('en-CA', {\n    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',\n  }).formatToParts(t);\n  const g = (k) => (p.find((x) => x.type === k) || {}).value;\n  return g('year') + '-' + g('month') + '-' + g('day') + ' ' + g('hour') + ':' + g('minute') + ' ' + TZ_LABEL;\n}\n\n// n8n reports an HTTP failure as e.g. 401 - \"{\\\"errors\\\":[{\\\"detail\\\":\\\"...\\\"}]}\" -\n// a JSON body nested inside a JSON string. Dig the human sentence back out.\nfunction apiDetail(raw) {\n  const msg = String(raw == null ? '' : raw);\n  const status = (msg.match(/\\b([45]\\d\\d)\\b/) || [])[1];\n  const starts = [msg.indexOf('\"'), msg.indexOf('{')].filter((i) => i >= 0);\n  for (const i of starts) {\n    try {\n      let v = JSON.parse(msg.slice(i));\n      if (typeof v === 'string') v = JSON.parse(v);\n      if (v && Array.isArray(v.errors) && v.errors.length) {\n        const detail = v.errors.map((e) => e.detail || e.title || JSON.stringify(e)).join('; ');\n        return (status ? status + ': ' : '') + detail;\n      }\n    } catch (e) { /* not this shape; try the next */ }\n  }\n  return msg;\n}\n\nconst now = new Date();\nconst nowStamp = stamp(now);\nconst localHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(now));\n// en-CA formats as YYYY-MM-DD, which compares correctly as a plain string.\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);\n\n// The Merge feeds us two kinds of item: per-IP check results (tagged by Config)\n// and whatever rows the state table currently holds.\nconst items = $input.all().map((i) => i.json || {});\nconst checks = items.filter((x) => x.__kind === 'abusewatch_check');\nconst stateByIp = {};\nfor (const r of items) {\n  if (r.__kind !== 'abusewatch_check' && r.ip) stateByIp[String(r.ip)] = r;\n}\n\nconst results = [];\nfor (const c of checks) {\n  const prev = stateByIp[c.ip] || null;\n  // An empty seen_keys means \"never successfully checked\" -> treat the next good\n  // read as a baseline instead of dumping the whole back catalogue into Slack.\n  const isBaseline = !prev || !String(prev.seen_keys || '').trim();\n  let prevSeen = new Set();\n  try { prevSeen = new Set(JSON.parse(String((prev && prev.seen_keys) || '[]'))); } catch (e) { prevSeen = new Set(); }\n  const prevStreak = Number((prev && prev.fail_streak) || 0);\n\n  const d = c.data;\n  if (!d || typeof d !== 'object' || d.ipAddress == null) {\n    let why = 'unrecognised API response';\n    if (c.error) why = apiDetail(typeof c.error === 'string' ? c.error : (c.error.message || JSON.stringify(c.error)));\n    else if (Array.isArray(c.errors) && c.errors.length) why = c.errors.map((e) => e.detail || JSON.stringify(e)).join('; ');\n    results.push(Object.assign({}, c, { prev, status: 'FAILED', failStreak: prevStreak + 1, error: clip(String(why), 300) }));\n    continue;\n  }\n\n  const reports = Array.isArray(d.reports) ? d.reports : [];\n  const total = Number(d.totalReports || 0);\n  const key = (r) => r.reportedAt + '|' + r.reporterId;\n  // reports[] only arrives with the verbose flag; fall back to counting if it is missing.\n  const detailed = reports.length > 0 || total === 0;\n  const newReports = (isBaseline || !detailed) ? [] : reports.filter((r) => !prevSeen.has(key(r)));\n  newReports.sort((a, b) => String(b.reportedAt).localeCompare(String(a.reportedAt)));\n  const blindNew = (isBaseline || detailed) ? 0 : Math.max(0, total - Number((prev && prev.total_reports) || 0));\n\n  results.push(Object.assign({}, c, {\n    prev, status: 'OK', isBaseline, detailed, blindNew, newReports,\n    seenKeys: reports.map(key),\n    score: Number(d.abuseConfidenceScore || 0),\n    total,\n    distinct: Number(d.numDistinctUsers || 0),\n    lastReportedAt: d.lastReportedAt || '',\n    isp: d.isp || '',\n    isWhitelisted: d.isWhitelisted === true,\n    isTor: d.isTor === true,\n    failStreak: 0,\n  }));\n}\n\nconst anyNew = results.some((r) => r.status === 'OK' && (r.newReports.length > 0 || r.blindNew > 0));\nconst anyBaseline = results.some((r) => r.status === 'OK' && r.isBaseline);\n// Shout once when the streak first crosses the threshold, then only daily, so a\n// broken API key does not turn into an hourly drumbeat in Slack.\nconst isFailAlert = (r) => r.status === 'FAILED' && (r.failStreak === FAIL_ALERT_AFTER\n  || (r.failStreak > FAIL_ALERT_AFTER && (r.failStreak - FAIL_ALERT_AFTER) % FAIL_RENAG_EVERY === 0));\nconst anyFailAlert = results.some(isFailAlert);\nconst anyFailed = results.some((r) => r.status === 'FAILED');\n// Latest recap date any row has seen. Missing/blank -> none ever sent.\nconst lastDigestOn = results\n  .map((r) => String((r.prev && r.prev.last_digest_on) || ''))\n  .sort()\n  .pop() || '';\n// Not \"it is exactly 16:00\" but \"it is 16:00 or later and today's recap is still owed\",\n// so a missed tick (n8n restarting, host down) is caught up on the next run instead of\n// being skipped for the day.\nconst isDigest = localHour >= DIGEST_HOUR && lastDigestOn !== today;\nconst forcePost = checks.some((c) => c.forcePost === true);\n\nconst lines = [];\nif (anyNew) lines.push('🚨 *AbuseWatch* — new abuse reports · ' + nowStamp);\nelse if (anyFailAlert) lines.push('⚠️ *AbuseWatch* — AbuseIPDB checks are failing · ' + nowStamp);\nelse if (anyBaseline) lines.push('👀 *AbuseWatch* — baseline recorded · ' + nowStamp);\nelse if (anyFailed) lines.push('⚠️ *AbuseWatch* — no new reports, but some checks did not run · ' + nowStamp);\nelse lines.push('✅ *AbuseWatch* — all clean · ' + nowStamp);\n\nfor (const r of results) {\n  lines.push('');\n  const who = '*<' + r.checkUrl + '|' + esc(r.label) + '>* `' + esc(r.ip) + '`';\n\n  if (r.status === 'FAILED') {\n    const icon = r.failStreak >= FAIL_ALERT_AFTER ? '⚠️' : '⏳';\n    lines.push(icon + ' ' + who + ' — check failed (' + r.failStreak + ' run' + (r.failStreak === 1 ? '' : 's') + ' in a row): ' + oneLine(r.error));\n    if (r.failStreak >= FAIL_ALERT_AFTER) lines.push('_Check the AbuseIPDB API key credential and the daily quota._');\n    continue;\n  }\n\n  const head = who + ' — confidence ' + r.score + '%, ' + r.total + ' report' + (r.total === 1 ? '' : 's') + ' in ' + r.maxAgeInDays + 'd';\n\n  if (r.isBaseline) {\n    lines.push(head + ' — _baseline recorded; new reports from here on will be flagged_');\n  } else if (r.newReports.length) {\n    lines.push(head + ' · *' + r.newReports.length + ' new*');\n    for (const rep of r.newReports.slice(0, MAX_BULLETS)) {\n      const cats = (rep.categories || []).map((n) => CATEGORIES[n] || ('category ' + n)).join(', ') || 'uncategorised';\n      const from = rep.reporterCountryCode ? ' [' + esc(rep.reporterCountryCode) + ']' : '';\n      lines.push('• `' + stamp(rep.reportedAt) + '` ' + esc(cats) + from + ' — _' + clip(oneLine(rep.comment || '(no comment)'), 160) + '_');\n    }\n    if (r.newReports.length > MAX_BULLETS) lines.push('• _…and ' + (r.newReports.length - MAX_BULLETS) + ' more_');\n  } else if (r.blindNew > 0) {\n    lines.push(head + ' · *' + r.blindNew + ' new* — _report detail unavailable; open the link for the list_');\n  } else {\n    const last = r.lastReportedAt ? ', last ' + stamp(r.lastReportedAt) : '';\n    lines.push(head + last + ' — no new reports');\n  }\n  if (r.isWhitelisted) lines.push('_AbuseIPDB has this address whitelisted._');\n  if (r.isTor) lines.push('_AbuseIPDB flags this address as a Tor exit node._');\n}\n\nconst digestClock = (DIGEST_HOUR % 12 || 12) + (DIGEST_HOUR < 12 ? 'am' : 'pm') + ' ' + TZ_LABEL;\nif (!anyNew && !anyFailAlert && !anyFailed) lines.push('', '_Checked hourly; this recap posts once a day, from ' + digestClock + '._');\n\nconst nowIso = now.toISOString();\nconst states = results.map((r) => ({\n  ip: r.ip,\n  label: r.label,\n  last_check_at: nowIso,\n  // A failed check must never clobber the state a good check left behind.\n  last_reported_at: r.status === 'OK' ? String(r.lastReportedAt || '') : String((r.prev && r.prev.last_reported_at) || ''),\n  total_reports: r.status === 'OK' ? r.total : Number((r.prev && r.prev.total_reports) || 0),\n  abuse_score: r.status === 'OK' ? r.score : Number((r.prev && r.prev.abuse_score) || 0),\n  seen_keys: r.status === 'OK' ? JSON.stringify(r.seenKeys) : String((r.prev && r.prev.seen_keys) || ''),\n  fail_streak: r.failStreak,\n  last_error: r.status === 'FAILED' ? r.error : '',\n  // isDigest implies we are posting, so mark the day done; otherwise carry forward.\n  last_digest_on: isDigest ? today : lastDigestOn,\n}));\n\nreturn [{\n  json: {\n    shouldPost: forcePost || anyNew || anyBaseline || anyFailAlert || isDigest,\n    text: lines.join('\\n'),\n    anyNew: anyNew,\n    anyBaseline: anyBaseline,\n    anyFailAlert: anyFailAlert,\n    isDigest: isDigest,\n    localHour: localHour,\n    states: states,\n  },\n}];\n"
+      },
+      "notes": "Diffs each IP against its stored report fingerprints, renders the Slack text and decides whether this run is worth posting."
+    },
+    {
+      "id": "a8",
+      "name": "Post Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        240
+      ],
+      "parameters": {
+        "jsCode": "// Returning zero items stops the branch, so quiet runs post nothing at all.\nconst j = $input.first().json;\nreturn j.shouldPost ? [{ json: { text: j.text } }] : [];\n"
+      }
+    },
+    {
+      "id": "a9",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1380,
+        240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "<<SLACK_WEBHOOK_URL>>",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Slack incoming webhook. The committed copy carries the <<SLACK_WEBHOOK_URL>> placeholder."
+    },
+    {
+      "id": "a10",
+      "name": "Explode States",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        520
+      ],
+      "parameters": {
+        "jsCode": "// One item per watched IP so the Data Table upsert runs once per row.\nreturn ($input.first().json.states || []).map((s) => ({ json: s }));\n"
+      }
+    },
+    {
+      "id": "a11",
+      "name": "Save State",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1380,
+        520
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "<<DATATABLE_ID>>",
+          "cachedResultName": "abuse_watch_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "ip",
+              "condition": "eq",
+              "keyValue": "={{ $json.ip }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ip": "={{ $json.ip }}",
+            "label": "={{ $json.label }}",
+            "last_check_at": "={{ $json.last_check_at }}",
+            "last_reported_at": "={{ $json.last_reported_at }}",
+            "total_reports": "={{ $json.total_reports }}",
+            "abuse_score": "={{ $json.abuse_score }}",
+            "seen_keys": "={{ $json.seen_keys }}",
+            "fail_streak": "={{ $json.fail_streak }}",
+            "last_error": "={{ $json.last_error }}",
+            "last_digest_on": "={{ $json.last_digest_on }}"
+          }
+        }
+      },
+      "notes": "Written on every run, including runs that post nothing."
+    }
+  ],
+  "connections": {
+    "Schedule Hourly": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Check": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Check AbuseIPDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Config + Response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check AbuseIPDB": {
+      "main": [
+        [
+          {
+            "node": "Merge Config + Response",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Config + Response": {
+      "main": [
+        [
+          {
+            "node": "Merge State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get State": {
+      "main": [
+        [
+          {
+            "node": "Merge State",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge State": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze": {
+      "main": [
+        [
+          {
+            "node": "Post Gate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Explode States",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Gate": {
+      "main": [
+        [
+          {
+            "node": "Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explode States": {
+      "main": [
+        [
+          {
+            "node": "Save State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true
+  }
+}
